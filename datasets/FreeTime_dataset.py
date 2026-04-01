@@ -415,7 +415,7 @@ class FreeTimeParser:
                 print(f"  ... and {len(mismatches) - 5} more")
             print("[WARNING] This may cause GT/render mismatch! Check your COLMAP reconstruction.")
         else:
-            print(f"[FreeTimeParser] ✓ All {len(camera_names)} camera names match folder names")
+            print(f"[FreeTimeParser] OK All {len(camera_names)} camera names match folder names")
 
         # Auto-detect image format from first camera folder
         if image_format is None or frame_digits is None or frame_start is None:
@@ -646,6 +646,25 @@ class FreeTimeDataset:
 
         if mask is not None:
             data["mask"] = torch.from_numpy(mask).bool()
+
+        # Load per-frame mask if masks/ directory exists alongside images/
+        # Expected structure: {data_dir}/masks/{cam_name}/{frame_num}.png
+        masks_dir = os.path.join(self.parser.data_dir, "masks")
+        if os.path.isdir(masks_dir):
+            cam_name = self.parser.camera_names[cam_idx]
+            frame_num = frame_idx + self.parser.frame_start_offset
+            mask_name = f"{frame_num:0{self.parser.frame_digits}d}.png"
+            mask_path = os.path.join(masks_dir, cam_name, mask_name)
+            if os.path.exists(mask_path):
+                fg_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if fg_mask is not None:
+                    fg_mask = cv2.resize(
+                        fg_mask,
+                        dsize=(fg_mask.shape[1] // self.parser.factor,
+                               fg_mask.shape[0] // self.parser.factor),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                    data["mask"] = torch.from_numpy(fg_mask > 128).bool()
 
         return data
 

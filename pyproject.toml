@@ -39,6 +39,12 @@ dependencies = [
 [tool.uv]
 override-dependencies = ["pandas>=2.2"]
 
+[tool.uv.extra-build-dependencies]
+torch-scatter = ["torch"]
+fused-ssim = ["torch", "numpy"]
+gsplat = ["torch", "numpy"]
+plas = ["torch", "numpy"]
+
 [tool.uv.sources]
 pycolmap = { git = "https://github.com/JasonLSC/pycolmap.git" }
 fused-ssim = { git = "https://github.com/rahul-goel/fused-ssim", rev = "1272e21a282342e89537159e4bad508b19b34157" }

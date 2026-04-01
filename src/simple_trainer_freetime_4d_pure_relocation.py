@@ -2350,15 +2350,41 @@ class FreeTime4DRunner:
             colors_p = colors.permute(0, 3, 1, 2)  # [B, 3, H, W]
             pixels_p = pixels.permute(0, 3, 1, 2)  # [B, 3, H, W]
 
-            # 1. L1 Loss (reconstruction)
-            l1_loss = F.l1_loss(colors, pixels)
+            # 1. L1 Loss (reconstruction) - with optional mask + white bg for background
+            fg_mask = data.get("mask", None)
+            if fg_mask is not None:
+                fg_mask = fg_mask.to(device).float()  # [B, H, W]
+                if fg_mask.dim() == 2:
+                    fg_mask = fg_mask.unsqueeze(0)  # [1, H, W]
+                fg_mask_3d = fg_mask.unsqueeze(-1)  # [B, H, W, 1]
+                # Composite: foreground uses GT, background target is white
+                pixels_composite = pixels * fg_mask_3d + (1.0 - fg_mask_3d)  # white bg target
+                colors_composite = colors * fg_mask_3d + colors * (1.0 - fg_mask_3d)  # render as-is
+                # Weighted L1: foreground weight=1.0, background weight=0.1
+                fg_l1 = (torch.abs(colors - pixels) * fg_mask_3d).sum() / (fg_mask_3d.sum() * 3 + 1e-8)
+                bg_l1 = (torch.abs(colors - torch.ones_like(colors)) * (1.0 - fg_mask_3d)).sum() / ((1.0 - fg_mask_3d).sum() * 3 + 1e-8)
+                l1_loss = fg_l1 + 0.1 * bg_l1
+            else:
+                l1_loss = F.l1_loss(colors, pixels)
 
-            # 2. SSIM Loss (structural similarity)
-            ssim_val = fused_ssim(colors_p, pixels_p, padding="valid")
+            # 2. SSIM Loss (structural similarity) - white bg composite
+            if fg_mask is not None:
+                fg_mask_4d = fg_mask.unsqueeze(1)  # [B, 1, H, W]
+                colors_masked_p = colors_p * fg_mask_4d + (1.0 - fg_mask_4d)  # white bg
+                pixels_masked_p = pixels_p * fg_mask_4d + (1.0 - fg_mask_4d)  # white bg
+                ssim_val = fused_ssim(colors_masked_p, pixels_masked_p, padding="valid")
+            else:
+                ssim_val = fused_ssim(colors_p, pixels_p, padding="valid")
             ssim_loss = 1.0 - ssim_val
 
-            # 3. LPIPS Loss (perceptual similarity) - paper: λperc=0.01
-            lpips_loss = self.lpips(colors_p, pixels_p) if cfg.lambda_perc > 0 else torch.tensor(0.0, device=device)
+            # 3. LPIPS Loss (perceptual similarity) - white bg composite
+            if cfg.lambda_perc > 0:
+                if fg_mask is not None:
+                    lpips_loss = self.lpips(colors_masked_p, pixels_masked_p)
+                else:
+                    lpips_loss = self.lpips(colors_p, pixels_p)
+            else:
+                lpips_loss = torch.tensor(0.0, device=device)
 
             # 4. 4D Regularization (paper: λreg=1e-2) - after initial settling
             # Lreg(t) = (1/N) * Σ(σ * sg[σ(t)]) - stop-gradient on temporal opacity
