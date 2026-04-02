@@ -139,17 +139,21 @@ def match_pair_roma(model, img1, img2, device='cuda', resolution=560):
     H2, W2 = img2.shape[:2]
 
     # RoMa expects PIL images or torch tensors
-    from romatch.utils import get_tuple_transform_ops
     from PIL import Image
 
     pil1 = Image.fromarray(img1)
     pil2 = Image.fromarray(img2)
 
-    # Run matching
-    warp, certainty = model.match(pil1, pil2, device=device)
+    # Run matching with explicit garbage collection to avoid OOM
+    with torch.no_grad():
+        warp, certainty = model.match(pil1, pil2, device=device)
 
     # Extract good matches
     matches, batch_certainty = model.sample(warp, certainty, num=10000)
+
+    # Free GPU memory
+    del warp, certainty
+    torch.cuda.empty_cache()
 
     # Convert from normalized [-1, 1] to pixel coordinates
     kp1 = matches[:, :2].cpu().numpy()
@@ -201,8 +205,8 @@ def triangulate_frame(
     roma_model,
     device: str = 'cuda',
     masks_dir: str = None,
-    max_reproj_err: float = 2.0,
-    min_confidence: float = 0.5,
+    max_reproj_err: float = 5.0,
+    min_confidence: float = 0.1,
 ):
     """Triangulate dense point cloud for a single frame.
 
@@ -233,7 +237,7 @@ def triangulate_frame(
         return None, None
 
     available_cams = sorted(images.keys())
-    pairs = select_camera_pairs(available_cams, max_pairs=50)
+    pairs = select_camera_pairs(available_cams, max_pairs=100)
 
     all_points = []
     all_colors = []
@@ -306,7 +310,7 @@ def triangulate_frame(
     all_colors = np.concatenate(all_colors, axis=0)
 
     # Deduplicate via voxel grid
-    voxel_size = 0.005  # 5mm voxels
+    voxel_size = 0.001  # 1mm voxels
     voxel_indices = np.floor(all_points / voxel_size).astype(np.int64)
     _, unique_idx = np.unique(voxel_indices, axis=0, return_index=True)
 
@@ -327,9 +331,10 @@ def main():
     parser.add_argument("--masks-dir", type=str, default=None,
                         help="Masks directory (masks/{cam}/{frame}.png)")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--max-reproj-err", type=float, default=2.0)
-    parser.add_argument("--roma-model", type=str, default="roma_outdoor",
-                        choices=["roma_outdoor", "roma_indoor"])
+    parser.add_argument("--max-reproj-err", type=float, default=5.0)
+    parser.add_argument("--min-confidence", type=float, default=0.1)
+    parser.add_argument("--roma-model", type=str, default="roma_indoor",
+                        choices=["roma_outdoor", "roma_indoor", "tiny_roma"])
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -358,7 +363,12 @@ def main():
     # Load RoMa model
     print(f"Loading RoMa model ({args.roma_model})...")
     import romatch
-    roma_model = romatch.roma_outdoor(device=args.device)
+    if args.roma_model == "roma_indoor":
+        roma_model = romatch.roma_indoor(device=args.device)
+    elif args.roma_model == "tiny_roma":
+        roma_model = romatch.tiny_roma_v1_outdoor(device=args.device)
+    else:
+        roma_model = romatch.roma_outdoor(device=args.device)
     print("  RoMa loaded!")
 
     # Process each frame
@@ -374,6 +384,7 @@ def main():
             device=args.device,
             masks_dir=masks_dir,
             max_reproj_err=args.max_reproj_err,
+            min_confidence=args.min_confidence,
         )
 
         if positions is None:
